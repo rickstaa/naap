@@ -74,20 +74,18 @@ async function fetchAndStoreCsrfToken() {
 }
 
 // Clear ALL auth-related storage (use on logout or invalid session)
+// Note: httpOnly cookies (naap_auth_token, naap_csrf_token) cannot be cleared via JavaScript.
+// The logout endpoint (/api/v1/auth/logout) handles clearing those server-side.
+// This function clears client-accessible storage only.
 function clearAllAuthStorage() {
   if (typeof window === 'undefined') return;
 
-  // Clear tokens
+  // Clear localStorage tokens
   localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
   localStorage.removeItem(STORAGE_KEYS.CSRF_TOKEN);
 
-  // Clear cookies
-  document.cookie = `${STORAGE_KEYS.AUTH_TOKEN}=; path=/; max-age=0`;
-  document.cookie = `${STORAGE_KEYS.CSRF_TOKEN}=; path=/; max-age=0`;
-
-  // Clear any cached user data
+  // Clear session storage (may contain cached user data)
   try {
-    // Clear session storage as well
     sessionStorage.clear();
   } catch {
     // Ignore errors
@@ -413,12 +411,24 @@ export function RequireAuth({
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
+      // Only perform full cleanup when we have explicit evidence of an invalid session
+      // (401 or 200 with no user data). This preserves valid sessions during transient
+      // network errors (authErrorStatus === null).
       const hasExplicitInvalidSession = authErrorStatus === 401 || (authErrorStatus === 200 && !user);
+      
       if (hasExplicitInvalidSession) {
-        // Prevent middleware redirect loops when a stale/invalid client session exists.
+        // Use the logout endpoint for consistent cleanup of httpOnly cookie, then redirect.
+        // Clear client-side storage first, then call logout API to clear server-side cookie.
         clearAllAuthStorage();
+        fetch('/api/v1/auth/logout', { method: 'GET', credentials: 'include' })
+          .catch(() => {}) // Ignore errors - we're redirecting anyway
+          .finally(() => {
+            window.location.replace(`/login?redirect=${encodeURIComponent(pathname)}`);
+          });
+      } else {
+        // Transient error or no token - redirect without cleanup to preserve any valid cookie
+        window.location.replace(`/login?redirect=${encodeURIComponent(pathname)}`);
       }
-      window.location.replace('/login?redirect=' + encodeURIComponent(pathname));
     }
   }, [isLoading, isAuthenticated, authErrorStatus, user, pathname]);
 
