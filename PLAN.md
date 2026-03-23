@@ -1,144 +1,189 @@
-# Plan: Website + Explorer + Studio (Separate Repos, Aligned Styling)
+# Plan: livepeer-studio → Design System → Explorer → Website Link
 
-## Context
+## Revised Priority Order
 
-- **Website** (`adamsoffer/website`) already exists — Next.js 15, Tailwind v4, Favorit Pro, Holographik visual language
-- **NAAP** (`naap/`) is the platform monorepo — has web-next shell, workflow apps, plugin system, shared `@naap/theme` + `@naap/ui`
-- **Explorer** and **Studio** don't exist yet
-- Goal: website gets an "App" button linking to Explorer/Studio, then we build those apps with styling that aligns with website. Later extract shared design system — not now.
-
-## Architecture Decision
-
-**Separate repos.** No monorepo for website/explorer/studio.
-
-- `adamsoffer/website` — marketing site (already exists)
-- `livepeer/explorer` — new repo, protocol explorer
-- `livepeer/studio` — new repo, creator/developer tool
-
-NAAP stays as the platform infra monorepo. Explorer and Studio are standalone consumer apps.
+1. **livepeer-studio** — developer dashboard (new repo, reuse NAAP components)
+2. **@livepeer/ui** — extract design system package from NAAP
+3. **Explorer** — update with design system (lower priority)
+4. **Website** — add App button linking to Studio + Explorer
 
 ---
 
-## Phase 1: Website — Add "App" Button + Polish
+## What NAAP Gives Us (Audit Results)
+
+### Components Ready to Reuse (18 total from `@naap/ui`)
+| Category | Components |
+|----------|-----------|
+| Layout | Card, Modal |
+| Data | Badge, Stat, VersionBadge, DataTable, Tooltip, ReleaseNotesViewer |
+| Forms | Button, Input, Textarea, Select, Label, SearchInput, FilterBar, Toggle, Tabs |
+| Feedback | EmptyState, LoadingState, LoadingSpinner, Skeleton, SkeletonCard, ConfirmDialog |
+
+### Theme Tokens (`@naap/theme`)
+- **Colors**: Dark surfaces (#121212, #1A1A1A, #222222), 6-level text hierarchy, brand green (#18794E/#1E9960), accent palette (blue, amber, rose, purple)
+- **Typography**: Inter + JetBrains Mono, 7-step type scale (display → label)
+- **Spacing**: 4px–48px scale
+- **Motion**: 4 timing presets + easing curves
+- **Dark mode**: class-based via CSS custom properties
+
+### Why Extraction Is Easy
+- 100% Tailwind utility classes — no CSS-in-JS lock-in
+- Components don't import icons directly (passed as props)
+- No Framer Motion in `@naap/ui` itself (only at app level)
+- Theme is pure TypeScript exports + CSS variables
+- No monorepo-specific coupling
+
+---
+
+## Phase 1: Create `livepeer-studio` Repo
+
+**New repo.** Developer-focused dashboard for Livepeer Gateway API.
+
+### Stack
+- Next.js 15, React 19, Tailwind v4, TypeScript
+- Copy NAAP's `@naap/ui` components directly into `src/components/ui/`
+- Copy NAAP's `@naap/theme` tokens into `src/styles/`
+- Adapt globals.css with NAAP's CSS variable system
+
+### Core Pages
+| Page | Description | NAAP Components Used |
+|------|------------|---------------------|
+| **Dashboard** | API usage stats, recent streams, quick actions | Card, Stat, Badge, DataTable |
+| **API Keys** | Create/manage/revoke keys | Card, Button, Input, Modal, ConfirmDialog |
+| **Streams** | Create stream, list active/past, stream detail | DataTable, Badge, SearchInput, FilterBar, Tabs |
+| **Assets** | Upload, transcode, manage video assets | DataTable, Card, EmptyState, LoadingState |
+| **Multistream** | Configure multistream targets | Card, Input, Select, Toggle, Button |
+| **Webhooks** | Configure event webhooks | DataTable, Card, Modal, Input |
+| **Usage & Billing** | Usage metrics, billing info | Card, Stat, Tabs |
+| **Settings** | Account, team management | Card, Input, Tabs, Toggle |
+
+### Layout
+- **Sidebar nav** (adapt from NAAP's web-next sidebar pattern)
+- **Top bar** with workspace/team context
+- **Dark mode default** (same as NAAP)
+
+### Data Layer
+- Livepeer Gateway API (REST)
+- Auth: API key-based initially
+
+### Steps
+1. Create repo, scaffold Next.js 15
+2. Copy `packages/ui/src/*.tsx` → `src/components/ui/`
+3. Copy `packages/theme/src/` → `src/styles/theme/`
+4. Set up globals.css with NAAP's CSS variable definitions
+5. Set up Tailwind config extending NAAP theme tokens
+6. Build sidebar layout shell
+7. Build pages one by one (Dashboard first, then API Keys, Streams, etc.)
+8. Connect to Gateway API
+
+**Deliverable:** Working developer dashboard at studio.livepeer.org
+
+---
+
+## Phase 2: Extract `@livepeer/ui` Design System Package
+
+**After Studio is working**, extract the shared pieces into a proper package.
+
+### What Goes In
+1. **`@livepeer/tokens`** — theme values (colors, type, spacing, motion, border radius)
+   - TypeScript exports
+   - CSS custom properties
+   - Tailwind preset (`require('@livepeer/tokens/tailwind')`)
+
+2. **`@livepeer/ui`** — React component library
+   - All 18 components from NAAP
+   - Built to ESM/CJS with type definitions (tsup)
+   - Peer deps: React 19, Tailwind v4
+   - Optional peer dep: Framer Motion, Lucide React
+
+### Package Structure
+```
+@livepeer/ui/
+├── src/
+│   ├── components/    (Button, Card, Modal, DataTable, etc.)
+│   ├── tokens/        (colors, typography, spacing, motion)
+│   ├── globals.css    (CSS variables + base utilities)
+│   └── tailwind.ts    (shared Tailwind config preset)
+├── package.json
+└── tsup.config.ts     (build ESM + CJS + types)
+```
+
+### Steps
+1. Create package (can be in NAAP monorepo or standalone repo)
+2. Move components from NAAP `packages/ui` → new package
+3. Add tsup build (ESM + CJS + .d.ts)
+4. Publish to npm as `@livepeer/ui`
+5. Update `livepeer-studio` to import from `@livepeer/ui` instead of local copies
+6. Update NAAP to import from `@livepeer/ui` (optional, can happen later)
+
+**Deliverable:** Published npm package that Studio and Explorer both consume.
+
+---
+
+## Phase 3: Explorer (Lower Priority)
+
+**New repo** or update existing if one exists.
+
+### Stack
+- Same as Studio: Next.js 15, React 19, Tailwind v4
+- Imports `@livepeer/ui` (the design system package from Phase 2)
+
+### Core Pages
+- Network overview dashboard
+- Orchestrators list + detail
+- Delegator detail
+- Rounds history
+- Governance/voting
+- Transaction feed
+
+### Data Layer
+- Livepeer subgraph (The Graph) for protocol data
+- Livepeer API for real-time metrics
+- No backend — client-side queries
+
+**Deliverable:** Functional Explorer using shared design system.
+
+---
+
+## Phase 4: Website — Add App Button
 
 **Repo:** `adamsoffer/website`
 
-1. Add "App" dropdown/button to Header nav
-   - "Explorer" links to explorer URL (placeholder initially, e.g. explorer.livepeer.org)
-   - "Studio" links to studio URL (placeholder initially, e.g. studio.livepeer.org)
-   - Style: matches existing nav pattern (see Header.tsx dropdown system)
-2. Ensure homepage sections are complete per the brief
-3. No design system extraction — just ship the site
+1. Add "App" button/dropdown to Header nav
+   - "Studio" → studio.livepeer.org
+   - "Explorer" → explorer.livepeer.org
+2. Style matches existing nav pattern
 
-**Deliverable:** Website live with App button pointing to Explorer and Studio.
-
----
-
-## Phase 2: Explorer — New Repo, New Styling
-
-**Repo:** `livepeer/explorer` (new)
-
-**Stack:** Next.js 15, React 19, Tailwind v4, TypeScript
-
-1. Scaffold Next.js 15 app
-2. **Copy styling approach from website** (not import — just align):
-   - Same `globals.css` pattern with `@theme` tokens (colors, type scale)
-   - Same color palette: `#121212` dark, `#18794E` green accent, green/blue families
-   - Same typography: Favorit Pro + Favorit Mono (same weights, same line heights)
-   - Same dark surface scale, text opacity hierarchy
-   - Same animation conventions (Framer Motion `whileInView`, `prefers-reduced-motion`)
-3. Build core Explorer pages:
-   - **Home/Dashboard** — network overview (orchestrators, stake, rounds, inflation)
-   - **Orchestrators list** — sortable table, performance scores, fees
-   - **Orchestrator detail** — delegators, reward history, commission rates
-   - **Delegator detail** — stake, rewards, delegation history
-   - **Rounds** — round history, participation
-   - **Transactions** — recent protocol transactions
-   - **Voting/Governance** — active proposals, voting status
-4. Data layer:
-   - Livepeer subgraph (The Graph) for protocol data
-   - Livepeer API for real-time orchestrator metrics
-   - No backend needed initially — all client-side subgraph queries
-5. Shared layout:
-   - Header with Livepeer logo + nav + link back to website
-   - Same footer pattern as website
-   - Container component (max-w-7xl)
-
-**Deliverable:** Functional Explorer with visual alignment to website.
-
----
-
-## Phase 3: Studio — New Repo, New Styling
-
-**Repo:** `livepeer/studio` (new)
-
-**Stack:** Next.js 15, React 19, Tailwind v4, TypeScript
-
-1. Scaffold Next.js 15 app
-2. **Same styling alignment as Explorer** — copy the `globals.css` theme tokens
-3. Build core Studio pages:
-   - **Dashboard** — API usage overview, recent streams, quick actions
-   - **API Keys** — create/manage/revoke keys
-   - **Streams** — create stream, list active/past streams, stream detail
-   - **Assets** — upload, transcode, manage video assets
-   - **Multistream** — configure multistream targets
-   - **Webhooks** — configure event webhooks
-   - **Usage & Billing** — usage metrics, billing info
-   - **Settings** — account, team management
-4. Data layer:
-   - Livepeer Gateway API (REST) for all operations
-   - Auth: API key or OAuth (TBD based on Gateway auth model)
-5. Same shared layout patterns (header, footer, container)
-
-**Deliverable:** Functional Studio with visual alignment to website and Explorer.
-
----
-
-## Phase 4: Extract Design System (Later)
-
-**Only after Website + Explorer + Studio are shipped and stable.**
-
-1. Identify what's actually shared (not hypothetically shared):
-   - Token values (colors, type, spacing, motion)
-   - Common components (Button, Card, Container, Badge, Input, etc.)
-   - Layout patterns (Header, Footer)
-2. Create `@livepeer/design-tokens` package
-   - Raw values only — not framework-specific
-   - Consumed via Tailwind config extension in each app
-3. Create `@livepeer/ui` package (optional, only if enough overlap)
-   - React components that all three apps actually use
-   - Published to npm, each app pins a version
-4. Each app migrates from copy-pasted tokens to the package at its own pace
-
----
-
-## What We're NOT Doing
-
-- **No monorepo** for website/explorer/studio
-- **No shared package upfront** — copy the tokens, move fast, extract later
-- **No NAAP dependency** — Explorer and Studio are standalone. They don't import from NAAP packages.
-- **No Stitches** — clean break, Tailwind v4 everywhere
-- **No over-abstraction** — three apps with the same `globals.css` theme is fine for now
+**Deliverable:** Website links to both apps.
 
 ---
 
 ## Sequencing
 
 ```
-Phase 1 (Website)  ──> can start now
-Phase 2 (Explorer) ──> can start in parallel with Phase 1
-Phase 3 (Studio)   ──> can start after Explorer patterns established
-Phase 4 (Design System) ──> after all three are stable
+Phase 1 (Studio)         ──> START NOW
+Phase 2 (Design System)  ──> after Studio works, extract shared code
+Phase 3 (Explorer)       ──> after design system published
+Phase 4 (Website link)   ──> after both apps are live
 ```
 
-Explorer and Studio can share a lot of scaffolding since they're both Next.js 15 + Tailwind v4. Once Explorer is set up, Studio copies its foundation.
+---
+
+## What We're NOT Doing
+
+- **No Stitches** — clean break, Tailwind v4 only
+- **No premature abstraction** — copy first, extract when we know what's shared
+- **No NAAP runtime dependency** — Studio/Explorer are standalone apps
+- **No Storybook yet** — build it when the design system is extracted (Phase 2)
+- **No monorepo** for website/studio/explorer
 
 ---
 
 ## Open Questions
 
-1. **Explorer URL**: explorer.livepeer.org? Or a subpath?
-2. **Studio URL**: studio.livepeer.org?
-3. **Auth for Studio**: What auth system? (Clerk, NextAuth, custom?)
-4. **Explorer data**: Existing subgraph endpoints or new ones?
-5. **Repo org**: `livepeer/explorer` and `livepeer/studio`? Or under `adamsoffer/`?
+1. **Studio URL**: studio.livepeer.org?
+2. **Auth for Studio**: API key only? Or OAuth/Clerk?
+3. **Gateway API base URL**: Which environment?
+4. **Explorer URL**: explorer.livepeer.org?
+5. **Repo org**: `livepeer/studio` and `livepeer/explorer`? Or under `adamsoffer/`?
+6. **Design system package scope**: `@livepeer/ui` or different npm scope?
