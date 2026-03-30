@@ -365,45 +365,44 @@ livepeer-studio/               ← NEW repo
 **Backend strategy — no separate backend service:**
 ```
 Network APIs:      Studio API route → Go Gateway HTTP API → Livepeer orchestrators
-Third-party APIs:  Studio API route → HMAC-signed proxy → Provider's API
-                   (or OAuth token forwarding if provider supports it)
+Third-party APIs:  Studio API route → OAuth token forwarding → Provider's API
 ```
 
 All API routes are Next.js API routes inside the Studio app. No separate Express/FastAPI service needed for v1.
 
+**OAuth from day one for third-party providers.** No HMAC bootstrapping phase. Building two auth systems (HMAC now, OAuth later) is more work than building one (OAuth). It's 2026 — OAuth libraries exist for every language. Providers who want to be listed implement OAuth. This gives us revocable, scoped tokens from the start.
+
 ## What to Extract from NAAP
 
-### UI Components (copy as-is, ~1,700 lines)
-Source: `rickstaa/naap/packages/ui/src/`
-All 18: Badge, Button, Card, ConfirmDialog, DataTable, EmptyState, FilterBar, Input, LoadingState, Modal, ReleaseNotesViewer, SearchInput, Stat, Tabs, Toggle, Tooltip, VersionBadge, index.ts
-Dependencies: react, lucide-react, framer-motion (1 component only)
-Changes: Remove VersionBadge hardcoded version, generalize ReleaseNotesViewer
+**Important: We do NOT copy NAAP's styling or components verbatim.** NAAP uses a dark glass-card aesthetic with Inter/JetBrains Mono. The website (`livepeer/website`) uses Favorit Pro/Mono fonts, Tailwind v4, and its own design language. Studio must match the website's look and feel, not NAAP's.
 
-### Theme (copy as-is, ~240 lines)
-Source: `rickstaa/naap/packages/theme/src/`
-Files: index.ts (color tokens, typography, spacing, radius, motion), globals.css (CSS vars, glass-card, scrollbars, animations), tailwind.config.ts (preset)
+**What we take from NAAP as functional patterns (logic, not styling):**
+- DataTable: pagination logic, sorting, column config, row click — rebuild with website styling
+- Modal: keyboard escape, backdrop click, portal rendering, scroll lock — rebuild styled
+- CreateKeyModal: 2-step flow pattern (name input → raw key display with copy + warning)
+- ApiKeyTable: column definitions, status badge mapping, action patterns
+- UsageCharts: Recharts area chart config, date range filtering logic, data aggregation
+- KeyDetailPanel: side panel pattern with usage drill-down
+- ModelsTab: search + filter + card grid pattern
+- Auth context: login/logout flow structure, token management, session validation
 
-### Developer-Web Reference App (copy and adapt, ~2,000 lines)
-Source: `rickstaa/naap/apps/workflows/developer-web/src/components/`
-Copy: APIKeysTab, CreateKeyModal, ApiKeyTable, KeyDetailPanel, UsageBillingTab, UsageCharts, ModelsTab, ModelCard, ModelDetailPanel, CompareDrawer
-Changes: Strip mock data imports, rename "Models" to "APIs", wire to real endpoints
-
-### Auth Patterns (adapt, ~434 lines)
-Source: `rickstaa/naap/apps/web-next/src/contexts/auth-context.tsx`
-Take: Login/logout flow, token in localStorage + cookie, session validation, CSRF
-Strip: Plugin/tenant system, team context, wallet login
-
-### API Utilities (copy as-is, ~400 lines)
-Source: `rickstaa/naap/apps/web-next/src/lib/`
-- `api/response.ts` — standardized success/error responses
+**What we take from NAAP as utilities (copy as-is, no styling):**
+- `api/response.ts` — standardized success/error response helpers
 - `rateLimit.ts` — in-memory rate limiters
 - `api/csrf.ts` — HMAC-SHA256 CSRF tokens
 
-### Layout Shell (adapt)
-Source: `rickstaa/naap/apps/web-next/src/components/layout/`
-- `app-layout.tsx` — sidebar + content grid
-- `sidebar.tsx` — collapsible nav (strip plugin system)
-- `top-bar.tsx` — page title + notifications
+**What we build fresh, matching website design:**
+- All UI components (buttons, cards, inputs, badges, tables, modals)
+- Layout shell (sidebar, topbar, content area)
+- Theme tokens — inherit from website's Tailwind config + Favorit fonts
+- Color palette, spacing, typography — all from website
+
+### Layout Shell (adapt pattern, restyle)
+Pattern from: `rickstaa/naap/apps/web-next/src/components/layout/`
+- `app-layout.tsx` — sidebar + content grid pattern
+- `sidebar.tsx` — collapsible nav pattern (strip plugin system)
+- `top-bar.tsx` — page title pattern
+All rebuilt with website's design language.
 
 ---
 
@@ -418,19 +417,24 @@ npx create-next-app@latest studio --app --tailwind --typescript --eslint
 - Delete boilerplate
 - Verify: `pnpm dev` works, blank page renders
 
-**Commit 2: Add design tokens and globals.css**
-- Copy NAAP theme tokens, globals.css, tailwind config
-- Wire tailwind to use theme preset
-- Verify: dark background, fonts load
+**Commit 2: Set up design system matching website**
+- Pull typography (Favorit Pro/Mono), color palette, and spacing from livepeer/website
+- Set up Tailwind v4 config inheriting website's design tokens
+- Add globals.css with font imports, base styles
+- Verify: fonts load, base styling matches website
 
-**Commit 3: Add UI component library**
-- Copy all 18 components from NAAP → `packages/ui/src/`
-- Fix imports (`@naap/ui` → `@livepeer/ui`)
-- Verify: test page rendering Button, Card, Badge, DataTable works
-- Delete test page
+**Commit 3: Build core UI components (website-styled)**
+- Build from scratch, matching website's design language:
+  - Button (primary/secondary/ghost/destructive, 3 sizes, loading)
+  - Card, Badge, Input/Textarea/Select
+  - Modal (keyboard escape, backdrop, portal)
+  - DataTable (sorting, pagination — use NAAP's logic as reference)
+- Reference NAAP's component logic for functionality, but style to match website
+- Verify: components render correctly
 
 **Commit 4: Add layout shell**
-- Create app-layout, sidebar (Dashboard, Explore, API Keys, Usage & Billing, Settings), top-bar
+- Build app-layout, sidebar, top-bar — styled to match website
+- Sidebar nav: Dashboard, Explore, API Keys, Usage & Billing, Settings
 - Wire into `app/(dashboard)/layout.tsx`
 - Verify: layout renders, sidebar collapses
 
@@ -514,20 +518,19 @@ npx create-next-app@latest studio --app --tailwind --typescript --eslint
 - For guest users on subsidized APIs: check IP limit, execute if under 10
 - Verify: playground "Run" button actually calls the network and returns a result
 
-### Day 6: Third-party provider support
+### Day 6: Third-party provider support (OAuth)
 
-**Commit 16: Add HMAC proxy for third-party APIs**
-- Extend `app/api/v1/run/[api]/[...path]/route.ts`
-- If API is third-party: sign with HMAC, forward to provider
-- Headers: X-Studio-Signature, X-Studio-Timestamp, X-Studio-User-Id
-- Rate limit per user
-- Verify: HMAC proxy works, request reaches provider
+**Commit 16: Add OAuth Connect flow**
+- Create `app/api/v1/connect/[provider]/start/route.ts` — generate state + PKCE, redirect
+- Create `app/api/v1/connect/[provider]/callback/route.ts` — exchange code, store tokens
+- Extend `app/api/v1/run/[api]/[...path]/route.ts` — if third-party API, load OAuth token, forward
+- Token refresh if expired
+- Verify: OAuth flow works end-to-end, request proxied with token
 
 **Commit 17: Add provider registration flow**
 - Create `app/(dashboard)/provider/page.tsx` — provider dashboard
 - Create `app/(dashboard)/provider/register/page.tsx` — registration wizard
-- Steps: name + URL → define endpoints (or upload OpenAPI spec) → verify HMAC → configure listing
-- Returns shared_secret
+- Steps: name + URL → OAuth config (authorize/token endpoints, client_id, scopes) → define endpoints (or upload OpenAPI spec) → configure listing
 - Verify: full registration works, API appears in catalog
 
 ### Day 7: Settings + Polish + Deploy
@@ -658,8 +661,8 @@ livepeer-studio/
 │   ├── tailwind.config.ts
 │   └── package.json
 ├── packages/
-│   ├── ui/src/                                   # 18 components from NAAP
-│   └── theme/src/                                # Design tokens from NAAP
+│   ├── ui/src/                                   # Components built fresh, website-styled
+│   └── theme/src/                                # Design tokens from website
 ├── turbo.json
 ├── pnpm-workspace.yaml
 └── package.json
@@ -1413,10 +1416,9 @@ User clicks "Run" on Pipelines' text-to-image (logged in, Pipelines connected vi
 | What to call things | "APIs" | Not Capabilities, Solutions, Pipelines, or Models |
 | Auth provider | Clerk | Pipelines already uses it, proven, OAuth social login |
 | Network API backend | Go Gateway (for now) | Already deployed, HTTP API. Swap to Python SDK later |
-| Third-party auth (v1) | HMAC signing | Simple, no OAuth required from providers |
-| Third-party auth (v2) | OAuth Connect | Revocable, scoped, standard. Required long-term |
+| Third-party auth | OAuth Connect from day one | One system, not two. Revocable, scoped, standard. Providers implement OAuth to get listed |
 | Store user API keys? | No | HMAC means no user keys. OAuth tokens are revocable |
 | Try without account? | Yes, subsidized | 10 free runs on LIVEPEER APIs. Growth funnel |
 | Billing | Credits (Stripe) | Buy credits, deduct per call. Stripe Connect for providers |
 | Provider playground | Auto-generated | From endpoint params schema. Provider writes no frontend |
-| UI components | Copy from NAAP | 18 components, ~1,700 lines, zero NAAP dependencies |
+| UI components | Build fresh, website-styled | Use NAAP as functional reference, style to match livepeer/website |
