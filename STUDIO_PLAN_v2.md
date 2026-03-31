@@ -1422,3 +1422,337 @@ User clicks "Run" on Pipelines' text-to-image (logged in, Pipelines connected vi
 | Billing | Credits (Stripe) | Buy credits, deduct per call. Stripe Connect for providers |
 | Provider playground | Auto-generated | From endpoint params schema. Provider writes no frontend |
 | UI components | Build fresh, website-styled | Use NAAP as functional reference, style to match livepeer/website |
+
+---
+
+## Appendix 13: Pipeline SDK & Network Deployment (`livepeer_gateway.runner`)
+
+### Overview
+
+To let providers deploy new AI capabilities onto the Livepeer network (like Replicate's `cog push` or Chutes' `chutes deploy`), we extend the existing Python SDK (`j0sh/livepeer-python-gateway`) with a **runner** module. Providers write a Python class, the SDK handles transport, containerization, and deployment.
+
+### How Replicate & Chutes do it (reference)
+
+**Replicate:** Provider writes `predict.py` with a `Predictor` class (inherits `BasePredictor`). `setup()` loads model once, `predict()` runs per request. Inputs defined via `Input()` type annotations with description, default, constraints. `cog push` builds container and deploys. Replicate auto-generates HTTP API + web playground from the `predict()` signature.
+
+**Chutes:** Similar pattern with Python decorators. `@chute()` decorator on a class defines GPU requirements and image. `@chute.endpoint()` defines callable routes. `chutes deploy` pushes to their serverless infra. Also offers pre-built vLLM chutes for common models (just specify model name, no code).
+
+**Common pattern:** Typed function signature IS the API contract. Platform reads it and generates everything else (HTTP server, playground UI, docs, client libraries).
+
+### Repo structure: `livepeer-python-gateway`
+
+```
+livepeer-python-gateway/
+  src/livepeer_gateway/
+
+    gateway/                # Gateway — routes requests TO the network
+      __init__.py
+      proxy.py              # HTTP server accepting user requests
+      routing.py            # Pick orchestrator for a request
+      auth.py               # Validate API keys, rate limit
+      billing.py            # Meter usage, deduct credits
+      trickle_bridge.py     # WebRTC/HTTP ↔ trickle translation
+
+    runner/                 # Runner — runs pipelines ON the network
+      __init__.py
+      pipeline.py           # Pipeline, StreamPipeline base classes
+      inputs.py             # Input(), LiveParam(), Output()
+      serve.py              # Wraps pipeline in HTTP + trickle server
+      schema.py             # Extract schema from predict() signature
+      cli.py                # `livepeer push` command
+
+    # Shared transport (used by both gateway and runner)
+    orchestrator.py         # Discovery, selection
+    selection.py            # Orchestrator selection logic
+    trickle_publisher.py    # Send frames via trickle
+    trickle_subscriber.py   # Receive frames via trickle
+    channel_reader.py       # Frame-level I/O
+    channel_writer.py       # Frame-level I/O
+    media_decode.py         # Video decode
+    media_output.py         # Video encode
+    media_publish.py        # Media publishing
+    lp_rpc_pb2.py           # Protobuf definitions
+    remote_signer.py        # Payment signing
+    ...
+```
+
+Three layers, one repo:
+- `livepeer_gateway.gateway` → "I route requests to the network" (eventually replaces Go gateway)
+- `livepeer_gateway.runner` → "I run pipelines on the network" (new)
+- `livepeer_gateway` (root) → Shared transport primitives (exists today)
+
+### Provider experience
+
+**Request-response pipeline (text-to-image, image-to-video):**
+```python
+from livepeer_gateway.runner import Pipeline, Input, Output
+
+class TextToImage(Pipeline):
+    gpu = "A100"
+
+    def setup(self):
+        from diffusers import StableDiffusionXLPipeline
+        self.pipe = StableDiffusionXLPipeline.from_pretrained("stabilityai/sdxl-1.0")
+
+    def predict(self,
+        prompt: str = Input(description="Text prompt"),
+        width: int = Input(default=1024, choices=[512, 768, 1024]),
+        height: int = Input(default=1024, choices=[512, 768, 1024]),
+        steps: int = Input(default=30, ge=1, le=100),
+    ) -> Output(type="image"):
+        image = self.pipe(prompt, width=width, height=height, 
+                         num_inference_steps=steps).images[0]
+        return image
+```
+
+**Real-time streaming pipeline (LV2V, Scope-like):**
+```python
+from livepeer_gateway.runner import StreamPipeline, LiveParam, VideoFrame
+
+class RealtimeStyle(StreamPipeline):
+    gpu = "A100"
+
+    def setup(self):
+        from streamdiffusion import StreamDiffusion
+        self.stream = StreamDiffusion("sd-turbo")
+
+    def on_frame(self,
+        frame: VideoFrame,
+        prompt: str = LiveParam(description="Style prompt"),
+        strength: float = LiveParam(default=0.6, min=0, max=1),
+    ) -> VideoFrame:
+        return self.stream(frame, prompt=prompt, strength=strength)
+```
+
+**CLI workflow:**
+```bash
+# Install
+pip install livepeer-gateway
+
+# Test locally
+livepeer predict my_pipeline.py -i prompt="a cat in space"
+
+# Deploy to network
+livepeer push my_pipeline.py
+#  → Reads pipeline class, extracts input/output schema
+#  → Generates Dockerfile (base image + deps + model weights)
+#  → Builds container
+#  → Pushes to registry
+#  → Registers capability on network
+#  → Orchestrators pull and run it
+#  → Appears in Studio catalog with auto-generated playground
+```
+
+### How `serve.py` works (the bridge)
+
+`serve.py` wraps a Pipeline class and connects it to the existing SDK transport. It reuses everything the SDK already has:
+
+**For request-response pipelines:**
+```
+serve.py starts HTTP server inside container:
+  POST /predict → deserialize inputs → call pipeline.predict() → serialize → respond
+  GET /schema → return input/output types (auto-generated from predict() signature)
+  GET /health → return status
+```
+
+**For streaming pipelines:**
+```
+serve.py uses existing SDK trickle transport:
+  trickle_subscriber ← receives encoded frames from gateway
+      ↓
+  media_decode → raw frames
+      ↓
+  pipeline.on_frame(frame, **live_params) → processed frame
+      ↓
+  media_output → encode
+      ↓
+  trickle_publisher → sends frames back to gateway
+  
+  Parameter updates arrive via separate channel → forwarded to on_frame() kwargs
+```
+
+The provider never imports trickle, protobuf, or media modules. They import `Pipeline`, `Input`, write `predict()`. The SDK does the rest.
+
+### Transport: End-to-end data flow
+
+**Request-response (e.g., text-to-image):**
+```
+User's browser
+  → POST https://studio.livepeer.org/v1/run/text-to-image
+  → Studio API route
+  → Go Gateway (or livepeer_gateway.gateway eventually)
+  → HTTP to orchestrator
+  → Orchestrator → container's POST /predict
+  → Container runs predict()
+  → Result flows back the same path
+```
+
+**Real-time streaming (e.g., Scope-like LV2V):**
+```
+User's browser
+  ↓ WebRTC (SDP offer/answer, ICE, camera stream)
+Studio/Gateway
+  ↓ Trickle protocol (HTTP segment streaming)
+Orchestrator runtime
+  ↓ trickle_subscriber → media_decode → raw frames
+Container (serve.py calls on_frame() per frame)
+  ↓ processed frames → media_output → trickle_publisher
+Orchestrator runtime
+  ↓ Trickle protocol
+Studio/Gateway
+  ↓ WebRTC
+User's browser
+
+Parameter updates (user moves slider in playground):
+  Browser → WebRTC data channel → Gateway → forwarded to container → on_frame() sees new kwargs
+```
+
+### Schema → Studio playground (auto-generation)
+
+The `predict()` / `on_frame()` signature maps directly to Studio's `api_endpoints.params` schema:
+
+```python
+# Provider writes:
+def predict(self,
+    prompt: str = Input(description="Text prompt"),
+    steps: int = Input(default=30, ge=1, le=100),
+    model: str = Input(default="sdxl", choices=["sd15", "sdxl", "sd3"]),
+) -> Output(type="image"):
+```
+
+```json
+// Studio receives (via schema endpoint or registry):
+{
+  "params": [
+    { "name": "prompt", "type": "string", "required": true, "description": "Text prompt" },
+    { "name": "steps", "type": "number", "default": 30, "min": 1, "max": 100 },
+    { "name": "model", "type": "enum", "default": "sdxl", "values": ["sd15", "sdxl", "sd3"] }
+  ],
+  "response_type": "image",
+  "interaction_type": "request_response"
+}
+```
+
+Studio auto-generates the playground form from this. For `StreamPipeline`, `interaction_type` is `"webrtc_stream"` and `LiveParam` fields become real-time sliders.
+
+### Communication: Provider ↔ Network (after deployment)
+
+No direct channel between provider and orchestrator. The registry is the intermediary.
+
+| What | How | Who sees it |
+|------|-----|-------------|
+| Request volume, latency, errors | Studio logs every proxied request | Provider Dashboard in Studio |
+| Container health | Orchestrator pings `/health` inside container | Network health monitoring |
+| Container crashes | Orchestrator reports to network | Provider sees in Studio |
+| Revenue per request | Studio tracks billing | Provider Dashboard |
+| Push new version | `livepeer push` → registry → orchestrators pull | Rolling update, zero downtime |
+| View logs (MVP) | Metrics only (request count, error rate, latency) | Provider Dashboard |
+| View logs (later) | Container stdout/stderr → log aggregation | Provider Dashboard |
+
+### Code size estimate
+
+| Component | Lines | Who builds it |
+|-----------|-------|--------------|
+| `runner/pipeline.py` — base classes | ~100 | Livepeer (SDK) |
+| `runner/inputs.py` — type annotations | ~50 | Livepeer (SDK) |
+| `runner/serve.py` — HTTP + trickle bridge | ~350 | Livepeer (SDK) |
+| `runner/schema.py` — extract schema from signature | ~50 | Livepeer (SDK) |
+| `runner/cli.py` — `livepeer push` | ~200 | Livepeer (SDK) |
+| **Runner total** | **~750** | |
+| `gateway/` — full gateway (replaces Go) | ~1,000 | Livepeer (later) |
+| **Provider writes** | **~20-50** | **Provider** |
+
+### Timeline
+
+```
+Month 2:    runner/ module — Pipeline, StreamPipeline, serve, push CLI
+            Providers can deploy request-response pipelines
+Month 3:    StreamPipeline support (on_frame + trickle bridge)
+            WebRTC playground in Studio for streaming pipelines
+Month 4+:   gateway/ module — Python replacement for Go gateway
+            Full control over routing, auth, billing per user
+```
+
+### How this changes the Studio catalog
+
+When a provider does `livepeer push`:
+1. Container built and pushed to registry
+2. Capability registered on network with schema
+3. Orchestrators opt-in, pull container, advertise capability
+4. Studio's `/api/v1/apis` endpoint detects new network capability
+5. Auto-creates catalog entry with `provider_type = 'network'`
+6. Playground auto-generated from schema
+7. Badge: `LIVEPEER · by ProviderName`
+
+The provider goes from "I have a model" to "it's live on the network with a playground" in one `livepeer push`.
+
+---
+
+## Appendix 14: Live Playground for WebRTC/Streaming APIs
+
+### The problem
+
+Most APIs are request-response: form → run → result. But Scope/Daydream and LV2V pipelines are real-time streaming: webcam in → AI processing → video out, with live parameter tweaking.
+
+### Two playground types
+
+**Type 1: Request-Response (auto-generated from params schema)**
+Standard form: text inputs, dropdowns, sliders, file upload → Run button → result renderer.
+Covers: text-to-image, image-to-video, LLM inference, upscaling, etc.
+
+**Type 2: Live (WebRTC, for streaming APIs)**
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ┌──────────────┐    ┌──────────────┐                      │
+│  │  Input        │    │  Output       │                      │
+│  │  (webcam)    │ →  │  (AI result) │                      │
+│  └──────────────┘    └──────────────┘                      │
+│                                                              │
+│  Prompt: [cyberpunk neon city                          ]    │
+│  Noise:  ├────────●──────────┤ 0.6                         │
+│  Steps:  [1, 2, 4, 8 ▾]                                    │
+│  Paused: [ ]                                                │
+│                                                              │
+│  [Start Session]  [Stop]                                    │
+│  ⓘ Uses webcam. 3 free minutes without account.            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### How Studio knows which type to render
+
+From the pipeline schema:
+- `interaction_type: "request_response"` → form playground (Input fields)
+- `interaction_type: "webrtc_stream"` → live playground (LiveParam fields)
+
+Studio checks this field and renders the appropriate component.
+
+### WebRTC playground implementation (~200 lines reusable component)
+
+```
+1. Call provider's ICE servers endpoint → get TURN config
+2. Create RTCPeerConnection with those servers
+3. getUserMedia() → add local webcam stream as track
+4. Create SDP offer → POST to provider's offer endpoint → get answer
+5. Set remote description → connection established
+6. Render remote stream in <video> element
+7. Open RTCDataChannel for live parameter updates
+8. User moves slider → send JSON param update over data channel
+9. On stop: close connection, stop tracks
+```
+
+This is a single reusable React component. Every streaming API provider uses the same pattern — the only difference is the `live_params` schema which determines what sliders/inputs appear.
+
+### Subsidized free tier for streaming
+
+- 3 free minutes per session for anonymous users (vs 10 runs for request-response)
+- Metered by session duration, not request count
+- Timer shown in playground UI
+- After 3 minutes: "Sign up to continue"
+
+### Timeline
+
+```
+Week 1-2:   Request-response playground (auto-generated forms)
+Week 3-4:   Live WebRTC playground component
+            Works for Scope/Daydream and any future streaming API
+```
