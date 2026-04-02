@@ -26,7 +26,16 @@ export default function PublicOverviewPage() {
     setPrefsReady(true);
   }, []);
 
-  const { data, loading, refreshing, error } = usePublicDashboard({
+  const {
+    data,
+    lbLoading,
+    rtLoading,
+    feesLoading,
+    lbRefreshing,
+    rtRefreshing,
+    feesRefreshing,
+    error,
+  } = usePublicDashboard({
     timeframe,
     jobFeedPollInterval,
     skip: !prefsReady,
@@ -71,12 +80,12 @@ export default function PublicOverviewPage() {
               jobFeedError={null}
               timeframe={timeframe}
               onTimeframeChange={handleTimeframeChange}
-              lbLoading={loading}
-              rtLoading={loading}
-              feesLoading={loading}
-              lbRefreshing={refreshing}
-              rtRefreshing={refreshing}
-              feesRefreshing={refreshing}
+              lbLoading={lbLoading}
+              rtLoading={rtLoading}
+              feesLoading={feesLoading}
+              lbRefreshing={lbRefreshing}
+              rtRefreshing={rtRefreshing}
+              feesRefreshing={feesRefreshing}
               lbError={null}
               rtError={null}
               feesError={null}

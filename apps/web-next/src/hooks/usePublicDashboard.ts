@@ -6,6 +6,13 @@
  * Fetches dashboard data directly from REST API routes, bypassing the
  * event bus / plugin system. Used for the public (unauthenticated) overview
  * where PluginProvider does not load plugins.
+ *
+ * Data is split into three independent fetch groups matching the
+ * authenticated dashboard's query structure so each section renders
+ * progressively as its data arrives:
+ *   - lb: KPI, pipelines, catalog, orchestrators  (+ job feed)
+ *   - rt: protocol, GPU capacity, pricing
+ *   - fees: fee history
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -42,8 +49,12 @@ export interface UsePublicDashboardOptions {
 
 export interface UsePublicDashboardResult {
   data: PublicDashboardData;
-  loading: boolean;
-  refreshing: boolean;
+  lbLoading: boolean;
+  rtLoading: boolean;
+  feesLoading: boolean;
+  lbRefreshing: boolean;
+  rtRefreshing: boolean;
+  feesRefreshing: boolean;
   error: string | null;
   refetch: () => void;
 }
@@ -81,14 +92,25 @@ export function usePublicDashboard(
     jobs: [],
     jobFeedConnected: false,
   });
-  const [loading, setLoading] = useState(!skip);
-  const [hasFetched, setHasFetched] = useState(false);
+
+  const [lbLoading, setLbLoading] = useState(!skip);
+  const [rtLoading, setRtLoading] = useState(!skip);
+  const [feesLoading, setFeesLoading] = useState(!skip);
+  const [lbHasFetched, setLbHasFetched] = useState(false);
+  const [rtHasFetched, setRtHasFetched] = useState(false);
+  const [feesHasFetched, setFeesHasFetched] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const errorsRef = useRef<string[]>([]);
 
-  const fetchAll = useCallback(async () => {
+  const syncError = useCallback(() => {
+    setError(errorsRef.current.length > 0 ? errorsRef.current.join('; ') : null);
+  }, []);
+
+  // Group 1: KPI, pipelines, catalog, orchestrators, job feed
+  const fetchLb = useCallback(async () => {
     if (!mountedRef.current) return;
-    setLoading(true);
+    setLbLoading(true);
 
     const period = timeframeToPeriod(timeframe);
     const settled = await Promise.allSettled([
@@ -96,10 +118,6 @@ export function usePublicDashboard(
       fetchJson<DashboardPipelineUsage[]>(`${API}/pipelines?timeframe=${timeframe}&limit=50`),
       fetchJson<DashboardPipelineCatalogEntry[]>(`${API}/pipeline-catalog`),
       fetchJson<DashboardOrchestrator[]>(`${API}/orchestrators?period=${period}`),
-      fetchJson<DashboardProtocol>(`${API}/protocol`),
-      fetchJson<DashboardGPUCapacity>(`${API}/gpu-capacity?timeframe=${timeframe}`),
-      fetchJson<DashboardPipelinePricing[]>(`${API}/pricing`),
-      fetchJson<DashboardFeesInfo>(`${API}/fees?days=180`),
       fetchJson<{ streams: JobFeedEntry[]; queryFailed?: boolean }>(`${API}/job-feed`),
     ]);
 
@@ -108,52 +126,120 @@ export function usePublicDashboard(
     const val = <T,>(r: PromiseSettledResult<T>): T | null =>
       r.status === 'fulfilled' ? r.value : null;
 
-    const [kpi, pipelines, catalog, orchestrators, protocol, gpuCap, pricing, fees, jobFeedRaw] =
-      settled.map(val) as [
-        DashboardKPI | null, DashboardPipelineUsage[] | null,
-        DashboardPipelineCatalogEntry[] | null, DashboardOrchestrator[] | null,
-        DashboardProtocol | null, DashboardGPUCapacity | null,
-        DashboardPipelinePricing[] | null, DashboardFeesInfo | null,
-        { streams: JobFeedEntry[]; queryFailed?: boolean } | null,
-      ];
+    const [kpi, pipelines, catalog, orchestrators, jobFeedRaw] = settled.map(val) as [
+      DashboardKPI | null,
+      DashboardPipelineUsage[] | null,
+      DashboardPipelineCatalogEntry[] | null,
+      DashboardOrchestrator[] | null,
+      { streams: JobFeedEntry[]; queryFailed?: boolean } | null,
+    ];
 
     const failures = settled
       .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
       .map((r) => (r.reason as Error)?.message ?? 'Unknown error');
 
-    setData({
+    setData((prev) => ({
+      ...prev,
       kpi,
       pipelines: pipelines ?? [],
       pipelineCatalog: catalog ?? [],
       orchestrators: orchestrators ?? [],
+      jobs: jobFeedRaw?.streams ?? [],
+      jobFeedConnected: !!(jobFeedRaw && !jobFeedRaw.queryFailed),
+    }));
+
+    errorsRef.current = [...errorsRef.current.filter((e) => !e.includes('/kpi') && !e.includes('/pipelines') && !e.includes('/pipeline-catalog') && !e.includes('/orchestrators') && !e.includes('/job-feed')), ...failures];
+    syncError();
+    setLbHasFetched(true);
+    setLbLoading(false);
+  }, [timeframe, syncError]);
+
+  // Group 2: protocol, GPU capacity, pricing
+  const fetchRt = useCallback(async () => {
+    if (!mountedRef.current) return;
+    setRtLoading(true);
+
+    const settled = await Promise.allSettled([
+      fetchJson<DashboardProtocol>(`${API}/protocol`),
+      fetchJson<DashboardGPUCapacity>(`${API}/gpu-capacity?timeframe=${timeframe}`),
+      fetchJson<DashboardPipelinePricing[]>(`${API}/pricing`),
+    ]);
+
+    if (!mountedRef.current) return;
+
+    const val = <T,>(r: PromiseSettledResult<T>): T | null =>
+      r.status === 'fulfilled' ? r.value : null;
+
+    const [protocol, gpuCap, pricing] = settled.map(val) as [
+      DashboardProtocol | null,
+      DashboardGPUCapacity | null,
+      DashboardPipelinePricing[] | null,
+    ];
+
+    const failures = settled
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((r) => (r.reason as Error)?.message ?? 'Unknown error');
+
+    setData((prev) => ({
+      ...prev,
       protocol,
       gpuCapacity: gpuCap,
       pricing: pricing ?? [],
-      fees,
-      jobs: jobFeedRaw?.streams ?? [],
-      jobFeedConnected: !!(jobFeedRaw && !jobFeedRaw.queryFailed),
-    });
-    setError(failures.length > 0 ? failures.join('; ') : null);
-    setHasFetched(true);
-    setLoading(false);
-  }, [timeframe]);
+    }));
 
-  // Initial fetch
+    errorsRef.current = [...errorsRef.current.filter((e) => !e.includes('/protocol') && !e.includes('/gpu-capacity') && !e.includes('/pricing')), ...failures];
+    syncError();
+    setRtHasFetched(true);
+    setRtLoading(false);
+  }, [timeframe, syncError]);
+
+  // Group 3: fees
+  const fetchFees = useCallback(async () => {
+    if (!mountedRef.current) return;
+    setFeesLoading(true);
+
+    try {
+      const fees = await fetchJson<DashboardFeesInfo>(`${API}/fees?days=180`);
+      if (!mountedRef.current) return;
+      setData((prev) => ({ ...prev, fees }));
+      errorsRef.current = errorsRef.current.filter((e) => !e.includes('/fees'));
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setData((prev) => ({ ...prev, fees: null }));
+      errorsRef.current = [...errorsRef.current.filter((e) => !e.includes('/fees')), (err as Error)?.message ?? 'Fees fetch failed'];
+    }
+
+    syncError();
+    setFeesHasFetched(true);
+    setFeesLoading(false);
+  }, [syncError]);
+
+  const refetch = useCallback(() => {
+    fetchLb();
+    fetchRt();
+    fetchFees();
+  }, [fetchLb, fetchRt, fetchFees]);
+
+  // Initial fetch — all three groups fire concurrently
   useEffect(() => {
     mountedRef.current = true;
-    if (!skip) fetchAll();
+    if (!skip) {
+      fetchLb();
+      fetchRt();
+      fetchFees();
+    }
     return () => { mountedRef.current = false; };
-  }, [fetchAll, skip]);
+  }, [fetchLb, fetchRt, fetchFees, skip]);
 
-  // Job feed polling — starts after the initial fetch completes (hasFetched is reactive)
+  // Job feed polling — starts after the lb group's initial fetch
   useEffect(() => {
-    if (skip || !hasFetched || !jobFeedPollInterval || jobFeedPollInterval <= 0) return;
+    if (skip || !lbHasFetched || !jobFeedPollInterval || jobFeedPollInterval <= 0) return;
 
     const id = setInterval(async () => {
       try {
         const result = await fetchJson<{ streams: JobFeedEntry[]; queryFailed?: boolean }>(`${API}/job-feed`);
         if (mountedRef.current && result) {
-          setData(prev => ({
+          setData((prev) => ({
             ...prev,
             jobs: result.streams ?? [],
             jobFeedConnected: !result.queryFailed,
@@ -165,9 +251,17 @@ export function usePublicDashboard(
     }, jobFeedPollInterval);
 
     return () => clearInterval(id);
-  }, [skip, hasFetched, jobFeedPollInterval]);
+  }, [skip, lbHasFetched, jobFeedPollInterval]);
 
-  const refreshing = loading && hasFetched;
-
-  return { data, loading, refreshing, error, refetch: fetchAll };
+  return {
+    data,
+    lbLoading,
+    rtLoading,
+    feesLoading,
+    lbRefreshing: lbLoading && lbHasFetched,
+    rtRefreshing: rtLoading && rtHasFetched,
+    feesRefreshing: feesLoading && feesHasFetched,
+    error,
+    refetch,
+  };
 }
