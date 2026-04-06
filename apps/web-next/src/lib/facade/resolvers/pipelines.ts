@@ -1,11 +1,11 @@
 /**
  * Pipelines resolver — NAAP Dashboard API backed.
  *
- * Single call to GET /v1/dashboard/pipelines which returns top N pipelines
- * pre-aggregated by session count over the last 24 hours, including mins.
+ * Uses the dashboard pipelines endpoint and maps the response into
+ * DashboardPipelineUsage rows for the facade.
  *
  * Source:
- *   GET /v1/dashboard/pipelines?limit=N
+ *   GET /v1/dashboard/pipelines?limit=N&window=Nh
  */
 
 import type { DashboardPipelineUsage } from '@naap/plugin-sdk';

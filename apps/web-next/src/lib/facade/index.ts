@@ -6,8 +6,8 @@
  * resolvers, raw-data, or external services directly.
  *
  * FACADE_USE_STUBS=true — forces all functions to return hardcoded stub data.
- * Unset (or "false") — implemented resolvers call the live NAAP API;
- * unimplemented resolvers (phases not yet complete) return stub data silently.
+ * Unset (or "false") — all resolvers call the live NAAP API; stub data is never
+ * injected, including catalog seeding from PIPELINE_DISPLAY.
  *
  * Adding a new data domain:
  *   1. Add the function signature here
@@ -49,7 +49,11 @@ const USE_STUBS = process.env.FACADE_USE_STUBS === 'true';
 // Dashboard — NAAP API backed (Phase 1)
 // ---------------------------------------------------------------------------
 
-export async function getDashboardKPI(opts: { timeframe?: string }): Promise<DashboardKPI> {
+export async function getDashboardKPI(opts: { 
+  timeframe?: string;
+  pipeline?: string;
+  model_id?: string;
+}): Promise<DashboardKPI> {
   if (USE_STUBS) return { ...stubs.kpi, timeframeHours: parseInt(opts.timeframe ?? '24', 10) || 24 };
   return resolveKPI(opts);
 }

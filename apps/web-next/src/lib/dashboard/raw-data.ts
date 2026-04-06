@@ -13,6 +13,8 @@
  *
  * NAAP API `window=` query caps (keep in sync with /api/v1/naap-api/warm):
  *   network/demand + sla/compliance: 24h max — pipelines catalog: no window
+ *
+ * In-process TTLs below align with {@link TTL} in facade/cache.ts (1h) for dashboard aggregation.
  */
 
 import { naapApiUpstreamUrl } from '@/lib/dashboard/naap-api-upstream';
@@ -157,9 +159,9 @@ function normalizePipelineCatalog(rawRows: unknown[]): PipelineCatalogEntry[] {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEMAND_TTL = 180;   // seconds — align with raw-data doc / BFF expectations
-const SLA_TTL = 300;
-const PIPELINES_TTL = 900;
+const DEMAND_TTL = 3600; // seconds — 1h; matches dashboard facade origin cache
+const SLA_TTL = 3600;
+const PIPELINES_TTL = 3600;
 
 // ---------------------------------------------------------------------------
 // In-process TTL cache
@@ -224,13 +226,13 @@ function parseTotalPages(pagination: { total_pages?: unknown } | undefined): num
 /** Limit parallel page fetches so a cold cache does not open hundreds of sockets at once. */
 const NAAP_PAGE_FETCH_CONCURRENCY = 8;
 
-async function fetchNaapPage(path: string, searchParams: URLSearchParams): Promise<Response> {
+async function fetchNaapPage(path: string, searchParams: URLSearchParams, ttl = DEMAND_TTL): Promise<Response> {
   const url = new URL(naapApiUpstreamUrl(path));
   for (const [k, v] of searchParams.entries()) {
     url.searchParams.set(k, v);
   }
   return fetch(url.toString(), {
-    next: { revalidate: 60 },
+    next: { revalidate: ttl },
     signal: AbortSignal.timeout(120_000),
   });
 }
@@ -260,6 +262,7 @@ async function fetchAllPages<T>(
   path: string,
   dataKey: string,
   params: URLSearchParams,
+  ttl = DEMAND_TTL,
 ): Promise<{ rows: T[]; totalPages: number }> {
   const pageSize = 200;
   params.set('page', '1');
@@ -269,7 +272,7 @@ async function fetchAllPages<T>(
 
   let firstRes: Response;
   try {
-    firstRes = await fetchNaapPage(path, new URLSearchParams(params));
+    firstRes = await fetchNaapPage(path, new URLSearchParams(params), ttl);
   } catch (err) {
     throw new Error(
       `[dashboard/raw-data] ${path} page 1 fetch failed: ${
@@ -306,7 +309,7 @@ async function fetchAllPages<T>(
       const pageParams = new URLSearchParams(params);
       pageParams.set('page', String(page));
       try {
-        const res = await fetchNaapPage(path, pageParams);
+        const res = await fetchNaapPage(path, pageParams, ttl);
         if (!res.ok) {
           throw new Error(
             `[dashboard/raw-data] ${path} page ${page} returned HTTP ${res.status}`,
@@ -391,6 +394,7 @@ export function getRawDemandRows(lookbackHours?: number): Promise<NetworkDemandR
       'network/demand',
       'demand',
       new URLSearchParams({ window: DASHBOARD_WINDOW }),
+      DEMAND_TTL,
     ).then((r) => r.rows)
   ).then(rows =>
     h >= DASHBOARD_MAX_HOURS ? rows : filterRowsByWindowStart(rows, h)
@@ -410,6 +414,7 @@ export function getRawSLARows(lookbackHours?: number): Promise<SLAComplianceRow[
       'sla/compliance',
       'compliance',
       new URLSearchParams({ window: DASHBOARD_WINDOW }),
+      SLA_TTL,
     ).then((r) => r.rows)
   ).then(rows =>
     h >= DASHBOARD_MAX_HOURS ? rows : filterRowsByWindowStart(rows, h)
@@ -420,7 +425,10 @@ export function getRawSLARows(lookbackHours?: number): Promise<SLAComplianceRow[
 export function getRawPipelineCatalog(): Promise<PipelineCatalogEntry[]> {
   return cachedFetch('pipelines', PIPELINES_TTL * 1000, async () => {
     const t0 = Date.now();
-    const res = await fetch(naapApiUpstreamUrl('pipelines'), { next: { revalidate: 60 }, signal: AbortSignal.timeout(120_000) });
+    const res = await fetch(naapApiUpstreamUrl('pipelines'), {
+      next: { revalidate: PIPELINES_TTL },
+      signal: AbortSignal.timeout(120_000),
+    });
     if (!res.ok) {
       throw new Error(
         `[dashboard/raw-data] /pipelines returned HTTP ${res.status}`,
@@ -438,6 +446,9 @@ export function getRawPipelineCatalog(): Promise<PipelineCatalogEntry[]> {
       );
     }
     const pipelines = normalizePipelineCatalog(rawRows);
+    if (pipelines.length === 0) {
+      throw new Error('[dashboard/raw-data] /pipelines returned no recognizable pipeline entries');
+    }
     console.log(`[dashboard/raw-data] pipelines fetched (${pipelines.length} entries) in ${Date.now() - t0}ms`);
     return pipelines;
   });
@@ -468,14 +479,17 @@ export async function warmDashboardCaches(): Promise<{
   sla: { rows: number };
   pipelines: { count: number };
 }> {
-  const [demandRows, slaRows, pipelines] = await Promise.all([
-    getRawDemandRows(),
-    getRawSLARows(),
-    getRawPipelineCatalog(),
-  ]);
+  const [demandRows, slaRows] = await Promise.all([getRawDemandRows(), getRawSLARows()]);
+  let pipelinesCount = 0;
+  try {
+    const pipelines = await getRawPipelineCatalog();
+    pipelinesCount = pipelines.length;
+  } catch (err) {
+    console.warn('[dashboard/raw-data] warm: pipelines fetch skipped:', err);
+  }
   return {
     demand: { rows: demandRows.length },
     sla: { rows: slaRows.length },
-    pipelines: { count: pipelines.length },
+    pipelines: { count: pipelinesCount },
   };
 }
