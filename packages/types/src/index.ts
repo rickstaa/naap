@@ -293,3 +293,6 @@ export * from './debug';
 
 // Re-export shared HTTP header constants (used by plugin-sdk & plugin-server-sdk)
 export * from './http-headers';
+
+// Re-export public network stats shapes (contract for /api/v1/public/stats)
+export * from './stats';
